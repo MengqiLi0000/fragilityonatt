@@ -1,0 +1,544 @@
+# Code for Lalonde (1986) Reanalysis
+
+```{r}
+# Reproducibility setup
+if (!requireNamespace("renv", quietly = TRUE)) install.packages("renv")
+renv::restore()
+renv::init(bare = TRUE)      
+renv::snapshot()
+
+library(ggplot2)
+library(dplyr)
+library(qte)
+
+# Load data (Directly comes from the qte package)
+data(lalonde.psid)
+data(lalonde.exp)
+psid <- lalonde.psid
+nsw <- lalonde.exp
+
+# Bins
+bin_age <- seq(min(c(psid$age, nsw$age)), max(c(psid$age, nsw$age)), by = 5)
+bin_educ <- seq(min(c(psid$education, nsw$education)), max(c(psid$education, nsw$education)), by = 2)
+
+# Assign bins
+psid <- psid %>%
+  mutate(age_bin = cut(age, breaks = bin_age, include.lowest = TRUE),
+         educ_bin = cut(education, breaks = bin_educ, include.lowest = TRUE))
+
+nsw <- nsw %>%
+  mutate(age_bin = cut(age, breaks = bin_age, include.lowest = TRUE),
+         educ_bin = cut(education, breaks = bin_educ, include.lowest = TRUE))
+
+# Count by strata
+psid_counts <- psid %>%
+  group_by(age_bin, educ_bin) %>%
+  summarise(control_n = n(), .groups = "drop")
+
+nsw_counts <- nsw %>%
+  group_by(age_bin, educ_bin) %>%
+  summarise(treated_n = n(), .groups = "drop")
+
+# Merge
+strata <- full_join(nsw_counts, psid_counts, by = c("age_bin", "educ_bin")) %>%
+  mutate(
+    treated_n = ifelse(is.na(treated_n), 0, treated_n),
+    control_n = ifelse(is.na(control_n), 0, control_n),
+    status = case_when(
+      treated_n > 0 & control_n == 0 ~ "Only Treated",
+      treated_n > 0 & control_n > 0 ~ "Common Support",
+      treated_n == 0 ~ "No Treated"
+    )
+  )
+
+# Plot
+ggplot(strata, aes(x = age_bin, y = educ_bin, fill = status)) +
+  geom_tile(color = "grey90", linewidth = 0.3) +
+  scale_fill_manual(
+    values = c("Common Support" = "#4D4D4D",
+               "Only Treated" = "#969696",
+               "No Treated" = "#D9D9D9"),
+    name = NULL
+  ) +
+  labs(
+    title = "Support Structure Across Age and Education Bins",
+    x = "Age Bin", y = "Education Bin"
+  ) +
+  theme_minimal(base_family = "serif") +
+  theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 8)),
+  axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+  axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+  axis.text = element_text(size = 10),
+  legend.position = "top",
+  legend.text = element_text(size = 9),
+  panel.grid = element_blank()
+)
+
+labs(
+  title = "Support Structure Across Age and Education Bins",
+  subtitle = "Presence of Common Support for Treated and Control Units",
+  caption = "Note: Data from NSW treated and PSID control cohorts."
+)
+```
+
+```{r}
+library(tidyr)
+
+# NSW experimental treatment group
+nsw <- lalonde.exp %>% mutate(treated = 1)
+
+# PSID observational control group
+psid <- lalonde.psid %>% mutate(treated = 0)
+combined <- bind_rows(nsw, psid)
+
+# Bin covariates for empirical stratification
+combined <- combined %>%
+  mutate(
+    age_bin = cut(age, breaks = c(17, 25, 30, 35, 40, 45, 50, 60), right = FALSE),
+    educ_bin = cut(education, breaks = c(0, 8, 10, 12, 14, 16), right = FALSE)
+  )
+
+# Estimate propensity scores
+ps_model <- glm(
+  treated ~ age + education + black + hispanic + married + nodegree + re74 + re75,
+  data = combined, family = binomial
+)
+
+combined$pscore <- predict(ps_model, type = "response")
+
+# Plot: Propensity score distribution
+
+ggplot(combined, aes(x = pscore, color = factor(treated), fill = factor(treated))) +
+  geom_histogram(alpha = 0.3, bins = 40, position = "identity") +
+  scale_fill_manual(
+    values = c("0" = "#377EB8", "1" = "#E41A1C"),  # Blue vs. Red
+    labels = c("Control", "Treated"),
+    name = NULL
+  ) +
+  scale_color_manual(
+    values = c("0" = "#377EB8", "1" = "#E41A1C"),
+    guide = "none"
+  ) +
+  labs(
+    title = "Propensity Score Distributions by Treatment Group",
+    x = "Estimated Propensity Score", y = "Count"
+  ) +
+  theme_minimal(base_family = "serif") +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 8)),
+    axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+    axis.text = element_text(size = 10),
+    legend.position = "top",
+    legend.text = element_text(size = 9),
+    panel.grid = element_blank()
+  )
+
+
+# Construct 2D strata count by treatment status
+
+strata_count <- combined %>%
+  group_by(age_bin, educ_bin, treated) %>%
+  tally() %>%
+  spread(treated, n, fill = 0) %>%
+  rename(control = `0`, treated = `1`) %>%
+  mutate(
+    support_status = case_when(
+      treated > 0 & control > 0 ~ "Common Support",
+      treated > 0 & control == 0 ~ "Only Treated",
+      treated == 0 & control > 0 ~ "No Treated",
+      TRUE ~ "Empty"
+    )
+  )
+
+# Plot: Support heatmap over covariate strata
+
+ggplot(strata_count, aes(x = age_bin, y = educ_bin, fill = support_status)) +
+  geom_tile(color = "grey90", linewidth = 0.3) +
+  scale_fill_manual(
+    values = c(
+      "Common Support" = "#4D4D4D",
+      "Only Treated" = "#969696",
+      "No Treated" = "#D9D9D9",
+      "Empty" = "white"
+    ),
+    name = NULL
+  ) +
+  labs(
+    title = "Empirical Support Across Age and Education Strata",
+    x = "Age Bin", y = "Education Bin"
+  ) +
+  theme_minimal(base_family = "serif") +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 8)),
+    axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+    axis.text = element_text(size = 10),
+    legend.position = "top",
+    legend.text = element_text(size = 9),
+    panel.grid = element_blank()
+  )
+```
+
+```{r}
+# Define Trimming Grid (Linked to δ)
+# ----------------------
+trimming_intervals <- list(
+  "0"   = c(0.3, 0.7),
+  "0.5" = c(0.25, 0.75),
+  "1.0" = c(0.2, 0.8),
+  "1.5" = c(0.15, 0.85),
+  "2.0" = c(0.1, 0.9),
+  "3.0" = c(0.05, 0.95),
+  "5.0" = c(0.01, 0.99)
+)
+
+# ----------------------
+# ATT Bounds Loop
+# ----------------------
+att_bounds <- data.frame(
+  delta = numeric(),
+  ATT = numeric(),
+  SE = numeric(),
+  lower = numeric(),
+  upper = numeric(),
+  width = numeric(),
+  Sign_Identified = character(),
+  Fragile = character()
+)
+
+for (delta in names(trimming_intervals)) {
+  range <- trimming_intervals[[delta]]
+  
+  trimmed <- combined %>% filter(pscore > range[1], pscore < range[2])
+  
+  if (nrow(trimmed) < 50) next
+  
+  match_result <- Match(Y = trimmed$re78, Tr = trimmed$treated, X = trimmed$pscore)
+  est <- match_result$est
+  se <- match_result$se.standard
+  lower <- est - 1.96 * se
+  upper <- est + 1.96 * se
+  width <- upper - lower
+  sign_id <- ifelse(lower > 0 | upper < 0, "Yes", "No")
+  fragile <- ifelse(upper < 0, "Yes", "No")
+  
+  att_bounds <- rbind(att_bounds, data.frame(
+    delta = as.numeric(delta),
+    ATT = est,
+    SE = se,
+    lower = lower,
+    upper = upper,
+    width = width,
+    Sign_Identified = sign_id,
+    Fragile = fragile
+  ))
+}
+
+# Add point estimate column
+att_bounds <- att_bounds %>% mutate(point = (lower + upper) / 2)
+
+# ----------------------
+# Plot: ATT Bounds over δ
+# ----------------------
+ggplot(att_bounds, aes(x = delta)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "grey80", alpha = 0.5) +
+  geom_line(aes(y = lower), linetype = "dashed") +
+  geom_line(aes(y = upper), linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dotted") +
+  geom_point(aes(y = point), shape = 21, fill = "black", size = 2) +
+  labs(
+    title = "Identified Set for ATT under Selection Curvature δ",
+    x = expression(delta~"(Assumption Strength)"),
+    y = "ATT Bounds"
+  ) +
+  theme_minimal(base_family = "serif") +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 8)),
+    axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+    axis.text = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+
+# ----------------------
+# ATT by Propensity Score Decile
+# ----------------------
+combined$pscore_bin <- ntile(combined$pscore, 10)
+ps_bin_att <- data.frame(bin = integer(), ATT = numeric(), SE = numeric(),
+                         lower = numeric(), upper = numeric(), n_treated = numeric(), n_control = numeric())
+
+for (b in 1:10) {
+  bin_data <- combined %>% filter(pscore_bin == b)
+  
+  if (length(unique(bin_data$treated)) < 2 || nrow(bin_data) < 50) next
+  
+  match_res <- Match(Y = bin_data$re78, Tr = bin_data$treated, X = bin_data$pscore, M = 1)
+  
+  est <- match_res$est
+  se <- match_res$se.standard
+  lower <- est - 1.96 * se
+  upper <- est + 1.96 * se
+  n_treated <- sum(bin_data$treated == 1)
+  n_control <- sum(bin_data$treated == 0)
+  
+  ps_bin_att <- rbind(ps_bin_att, data.frame(
+    bin = b,
+    ATT = est,
+    SE = se,
+    lower = lower,
+    upper = upper,
+    n_treated = n_treated,
+    n_control = n_control
+  ))
+}
+
+# Plot: ATT per PS decile
+ggplot(ps_bin_att, aes(x = bin, y = ATT)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  labs(title = "ATT by Propensity Score Decile",
+       x = "Propensity Score Bin (Decile)",
+       y = "ATT Estimate ± 95% CI") +
+  theme_minimal(base_family = "serif")
+
+# ----------------------
+# Bootstrap ATT Function
+# ----------------------
+set.seed(123)
+
+bootstrap_ATT <- function(data, n_boot = 500) {
+  att_list <- numeric(n_boot)
+  
+  for (i in 1:n_boot) {
+    boot_sample <- data[sample(1:nrow(data), replace = TRUE), ]
+    
+    if (length(unique(boot_sample$treated)) < 2) {
+      att_list[i] <- NA
+    } else {
+      match_res <- Match(Y = boot_sample$re78,
+                         Tr = boot_sample$treated,
+                         X = boot_sample$pscore, M = 1)
+      att_list[i] <- match_res$est
+    }
+  }
+  
+  att_list[!is.na(att_list)]
+}
+
+# Apply bootstrap on full and overlap-only data
+att_boot_full <- bootstrap_ATT(combined)
+overlap_only <- combined %>%
+  filter(pscore > 0.1, pscore < 0.9)  # example trimming
+att_boot_overlap <- bootstrap_ATT(overlap_only)
+
+# Combine and plot bootstrap distributions
+boot_df <- data.frame(
+  ATT = c(att_boot_full, att_boot_overlap),
+  Design = rep(c("Full Sample", "Overlap Only"), c(length(att_boot_full), length(att_boot_overlap)))
+)
+
+ggplot(boot_df, aes(x = ATT, fill = Design)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  facet_wrap(~ Design, scales = "free") +
+  scale_fill_grey(start = 0.3, end = 0.7, name = NULL) +  # Greyscale shades
+  labs(
+    title = "Bootstrap Distribution of ATT",
+    x = "ATT Estimate", y = "Frequency"
+  ) +
+  theme_minimal(base_family = "serif") +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 8)),
+    axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+    axis.text = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+```{r}
+# Simulate sensitivity bounds: ATT ± δ × SE
+delta_seq <- seq(0, 3, by = 0.1)
+att_lower <- att_hat - delta_seq * se_hat
+att_upper <- att_hat + delta_seq * se_hat
+
+# Create data frame
+delta_df <- data.frame(
+  delta = delta_seq,
+  lower = att_lower,
+  upper = att_upper,
+  sign_flip = (att_lower * att_upper < 0)  # True if 0 is within bounds
+)
+
+# View when sign flips
+print(delta_df)
+
+# Plot
+library(ggplot2)
+ggplot(delta_df, aes(x = delta)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightblue", alpha = 0.5) +
+  geom_line(aes(y = lower), color = "blue") +
+  geom_line(aes(y = upper), color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "δ-Fragility Plot: How Much Bias Flips ATT",
+    x = "δ (Bias Multiplier)", y = "ATT ± δ·SE"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# Propensity Score Estimation
+ps_model <- glm(treated ~ age + education + black + hispanic + married + nodegree + re74 + re75,
+                data = combined, family = binomial)
+
+combined$pscore <- predict(ps_model, type = "response")
+
+ # Covariate Space Coverage (2D Heatmap)
+strata_count <- combined %>%
+  group_by(age_bin, educ_bin, treated) %>%
+  tally() %>%
+  tidyr::spread(treated, n, fill = 0) %>%
+  rename(control = `0`, treated = `1`) %>%
+  mutate(
+    support = ifelse(treated > 0 & control > 0, "Included", "Excluded")
+  )
+
+match_full <- Match(Y = combined$re78,
+                    Tr = combined$treated,
+                    X = combined$pscore,
+                    M = 1)  # 1:1 matching
+
+att_full <- match_full$est
+
+# Limit in overlapping strata
+
+included_strata <- strata_count %>%
+  ungroup() %>%
+  filter(support == "Included") %>%
+  dplyr::select(age_bin, educ_bin)
+
+
+included_data <- combined %>%
+  semi_join(included_strata, by = c("age_bin", "educ_bin"))
+
+match_strata <- Match(Y = included_data$re78,
+                      Tr = included_data$treated,
+                      X = included_data$pscore,
+                      M = 1)
+
+att_strata <- match_strata$est
+
+# Matching on full sample
+match_all <- Match(Y = combined$re78,
+                   Tr = combined$treated,
+                   X = combined$pscore,
+                   M = 1)
+
+att_all <- match_all$est
+se_all <- match_all$se.standard
+
+# Matching on support region only
+supported_data <- semi_join(combined, included_strata, by = c("age_bin", "educ_bin"))
+
+match_supported <- Match(Y = supported_data$re78,
+                         Tr = supported_data$treated,
+                         X = supported_data$pscore,
+                         M = 1)
+
+att_support <- match_supported$est
+se_support <- match_supported$se.standard
+
+# Print
+cat("ATT on full sample:", round(att_all, 2), " (SE =", round(se_all, 2), ")\n")
+cat("ATT on support region:", round(att_support, 2), " (SE =", round(se_support, 2), ")\n")
+
+# Trim by pscore ∈ [0.1, 0.9]
+trimmed <- combined %>% filter(pscore > 0.1 & pscore < 0.9)
+
+match_trimmed <- Match(Y = trimmed$re78,
+                       Tr = trimmed$treated,
+                       X = trimmed$pscore,
+                       M = 1)
+
+att_trimmed <- match_trimmed$est
+se_trimmed <- match_trimmed$se.standard
+
+cat("ATT on trimmed sample [0.1, 0.9]:", round(att_trimmed, 2), " (SE =", round(se_trimmed, 2), ")\n")
+
+```
+
+```{r}
+# Find MAS-SI
+mas_si <- min(att_bounds$delta[att_bounds$lower > 0 | att_bounds$upper < 0])
+print(paste("MAS-SI (sign identifiable): δ* =", mas_si))
+
+# Find Fragility Index (where ATT crosses 0 from above)
+fragility <- min(att_bounds$delta[att_bounds$upper < 0])
+if (is.na(fragility)) {
+  print("Fragility Index: Decision to treat is robust under all δ tested.")
+} else {
+  print(paste("Fragility Index: δ_frag =", fragility))
+}
+```
+
+```{r}
+psid$treated <- 0
+nsw$treated <- 1
+combined <- rbind(nsw, psid)
+
+# Estimate propensity score using logit
+ps_model <- glm(treated ~ age + education + black + hispanic + married + nodegree + re74 + re75,
+                family = binomial(link = "logit"), data = combined)
+combined$pscore <- predict(ps_model, type = "response")
+
+# Create 10 propensity score bins (deciles)
+combined <- combined %>%
+  mutate(pscore_bin = ntile(pscore, 10))
+
+# Calculate ATT within each bin
+ps_bin_att <- combined %>%
+  group_by(pscore_bin) %>%
+  summarize(
+    ATT = mean(re78[treated == 1]) - mean(re78[treated == 0]),
+    se = sqrt(var(re78[treated == 1]) / sum(treated == 1) +
+              var(re78[treated == 0]) / sum(treated == 0)),
+    lower = ATT - 1.96 * se,
+    upper = ATT + 1.96 * se,
+    avg_pscore = mean(pscore),
+    n_treated = sum(treated == 1),
+    n_control = sum(treated == 0)
+  ) %>%
+  ungroup()
+
+# Calculate overall ATT (NSW - PSID)
+overall_att <- mean(combined$re78[combined$treated == 1]) -
+               mean(combined$re78[combined$treated == 0])
+
+# Visualize ATT by bin to identify breakdown
+
+# Redraw the ATT vs Avg PS plot
+ggplot(ps_bin_att, aes(x = avg_pscore, y = ATT)) +
+  geom_point(size = 2, fill = "black", shape = 21) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.02, color = "black") +
+  geom_hline(yintercept = -932.23, linetype = "dashed", color = "red") +
+  labs(
+    title = "ATT by Propensity Score Decile",
+    subtitle = "Dashed line: Full Sample ATT",
+    x = "Average PS in Bin",
+    y = "ATT Estimate ± 95% CI"
+  ) +
+  theme_minimal(base_family = "serif") +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5, margin = margin(b = 6)),
+    plot.subtitle = element_text(size = 10, hjust = 0.5, margin = margin(b = 10)),
+    axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+    axis.text = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+```
