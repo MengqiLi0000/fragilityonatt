@@ -1,4 +1,4 @@
-# Reproducing Results for "Estimand Fragility and Identification Diagnostics in Observational Causal Inference"
+# fragilityonatt
 
 This repository contains the code and output for the empirical section in the paper *Fragility in Average Treatment Effect on the Treated
 under Limited Covariate Support*.
